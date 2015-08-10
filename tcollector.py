@@ -426,7 +426,7 @@ class SenderThread(threading.Thread):
 
         self.dryrun = dryrun
         self.reader = reader
-        self.tags = sorted(tags.items())
+        self.tags = sorted(tags.items()) # dictionary transformed to list
         self.http = http
         self.hosts = hosts  # A list of (host, port) pairs.
         # Randomize hosts to help even out the load.
@@ -453,12 +453,16 @@ class SenderThread(threading.Thread):
             if hostport not in self.blacklisted_hosts:
                 break
         else:
-            LOG.info('No more healthy hosts, retry with previously blacklisted')
-            random.shuffle(self.hosts)
-            self.blacklisted_hosts.clear()
-            self.current_tsd = 0
-            hostport = self.hosts[self.current_tsd]
-
+            if self.http is None:
+                LOG.info('No more healthy hosts, retry with previously blacklisted')
+                random.shuffle(self.hosts)
+                self.blacklisted_hosts.clear()
+                self.current_tsd = 0
+                hostport = self.hosts[self.current_tsd]
+            else:
+                # TODO: Enable multiple HTTP endpoints
+                LOG.debug('Reusing HTTP connection %s on port %s', self.host, self.port)
+                hostport = self.hosts[self.current_tsd]  
         self.host, self.port = hostport
         LOG.info('Selected connection: %s:%d', self.host, self.port)
 
@@ -673,7 +677,12 @@ class SenderThread(threading.Thread):
             metrics = []
             for line in self.sendq:
                 # print " %s" % line
-                (metric, timestamp, value, raw_tags) = line.split(None, 3)
+                # not all metrics have metric-specific tags
+                try:
+                  (metric, timestamp, value, raw_tags) = line.split(None, 3)
+                except ValueError:
+                  (metric, timestamp, value) = line.split(None, 3)
+                  raw_tags = ''
                 # process the tags
                 metric_tags = dict()
                 for tag in raw_tags.strip().split():
@@ -685,7 +694,7 @@ class SenderThread(threading.Thread):
                 metric_entry['metric'] = metric
                 metric_entry['timestamp'] = timestamp
                 metric_entry['value'] = value
-                metric_entry['tags'] = self.tags.copy()
+                metric_entry['tags'] = dict(self.tags).copy()
                 metric_entry['tags'].update(metric_tags)
                 metrics.append(metric_entry)
                 # print "--Current metrics"
@@ -702,11 +711,14 @@ class SenderThread(threading.Thread):
                 # print "Using server: %s:%s" % (self.host, self.port)
                 # url = 'http://%s:%s/api/put?details' % (self.host, self.port)
                 # print "Url is %s" % url
+                LOG.debug('Sending metrics to http://%s:%s/api/put?details',
+                    self.host, self.port)
                 req = urllib2.Request('http://%s:%s/api/put?details' % (
                     self.host, self.port))
                 req.add_header('Content-Type', 'application/json')
                 try:
                     response = urllib2.urlopen(req, json.dumps(metrics))
+                    LOG.debug('Received response %s', response.getcode())
                     # clear out the sendq
                     self.sendq = []
                     # print "Got response code: %s" % response.getcode()
